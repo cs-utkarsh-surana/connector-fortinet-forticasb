@@ -1,222 +1,181 @@
 """
 FortiCASB REST Client implementation
+Updated to consolidate token management, API call handling, and additional header support
+into the FortiCASBClient class.
 """
 
 import requests
-import logging
-import arrow
-import logging.handlers
-from time import gmtime, strftime
-import jmespath
+from time import time
+from datetime import datetime
+from connectors.core.connector import get_logger, ConnectorError
 from requests_toolbelt.utils import dump
 
-
-class FortiCasbCS(object):
-    ''' Main API Client Class '''
-
-    def __init__(self,
-                 base_url,                 
-                 forticasb_credentials,
-                 verify_ssl=False,
-                 logger=None
-                 ):
-        self.forticasb_logging = self.set_logger(logger)
-        self.forticasb_credentials = "Basic " + forticasb_credentials
-        self.base_url = base_url + '/api/v1'
-        self.verify_ssl = self.set_verify_ssl(verify_ssl)
-        self.token_expires_at = 0
-        self.request_timeout = 20
-        self.headers = {
-            'user-agent': 'autobot',
-            'Authorization': self.forticasb_credentials
-        }
-        self.login()
-                
-
-    def set_logger(self, logger):
-        if logger is None:
-            logging.basicConfig(level=logging.DEBUG)
-            new_logger = logging.getLogger('API_Logger')
-            return new_logger
-        else:
-            return logger
-
-    def set_verify_ssl(self, ssl_status):
-        if isinstance(ssl_status,str):
-            ssl_status.lower()
-        if ssl_status in ["true", True]:
-            return True
-        elif ssl_status in ["false", False]:
-            return False
-        else:
-            return True
+logger = get_logger('fortinet-FortiCASB')
 
 
-    def login(self):
-        ''' Fetches bearer access token'''
+class FortiCASBClient:
+    def __init__(self, config):
+        """
+        Initialize the API client using the provided configuration.
 
+        - Ensures the server URL has the proper scheme and no trailing slash.
+        - Retrieves the API key (secret) and SSL verification flag.
+        """
+        self.server_url = config.get('server_url').strip('/')
+        if not self.server_url.startswith('https://') and not self.server_url.startswith('http://'):
+            self.server_url = 'https://' + self.server_url
+        self.secret = config.get('api_key')
+        self.verify_ssl = config.get('verify_ssl')
+        self.request_timeout = 20  # seconds
+        self.logger = logger
+
+    def convert_ts_epoch(self, ts):
+        """
+        Converts a timestamp in milliseconds (as provided by the API)
+        to an epoch timestamp in seconds.
+        """
+        dt = datetime.fromtimestamp(ts / 1000)
+        return dt.timestamp()
+
+    def generate_token(self):
+        """
+        Generates a new token using client credentials.
+        This method uses a basic-auth approach and expects a JSON response
+        with at least 'access_token' and 'expires' keys.
+        """
         try:
-            response = requests.post(
-            self.base_url+'/auth/credentials/token/',
-            headers=self.headers,
-            data={"grant_type": "client_credentials"},
-            verify=self.verify_ssl,
-            timeout=self.request_timeout
-            )        
-            self.forticasb_logging.debug('Authentication Request:\n{}'.format(dump.dump_all(response).decode('utf-8')))
-
-            if response and response.status_code == 200:
-                json_response = response.json()
-                self.headers['Authorization'] = 'Bearer ' + json_response['access_token']
-                self.headers.update({'companyId' : json_response['companyId']})
-                self.headers.update({'Content-Type' : 'application/json'})
-                self.token_expires_at = json_response['expires']
-                self.forticasb_logging.info('Authentication successful. it will be valid until: {}'.format(self.token_expires_at))
-
-            else:
-                raise Exception('Failed Authentication')
-
-        except Exception as e:
-            self.forticasb_logging.exception('Failed to open a session')
-            raise Exception('Failed to open a session: {}'.format(e))
-
-
-    def make_rest_call(self, endpoint, params=None, data=None, method='GET',debug=True):
-        '''make_rest_call'''
-
-        url = '{0}{1}'.format(self.base_url, endpoint)
-
-        if debug:
-            self.forticasb_logging.debug('Request URL {}\n Headers:{}'.format(url,self.headers))
-
-        try:
-            response = requests.request(method,
-                                        url,
-                                        json=data,
-                                        headers=self.headers,
-                                        verify=self.verify_ssl,
-                                        params=params,
-                                        timeout=self.request_timeout
-                                        )
-            
-            if debug:
-                self.forticasb_logging.debug('REQUESTS_DUMP:\n{}'.format(dump.dump_all(response).decode('utf-8')))
-            if response.status_code in [200,201]:
-                return {'Status':'Success','data':response.json()}
-            else:
-                return_data = {
-                        'Status': 'Failure',
-                        'data': {
-                                'Server Response':response.content,
-                                'Status Code': str(response.status_code)
-                        }
-                }
-                self.forticasb_logging.exception(return_data)
-                return return_data
-
-        except Exception as e:
-            self.forticasb_logging.exception("Request Failed: {}".format(e))
-            raise Exception("Request Failed: {}".format(e))
-
-    def get_resource_map(self):
-        '''Get the user and account basic information from FortiCASB'''
-        try:
-            response = self.make_rest_call('/resourceURLMap')
-            if response['Status'] == 'Success':
-                return response
-            else:
-                raise Exception(response)
-        except Exception as e:
-            self.forticasb_logging.exception(e)
-            raise Exception(e)
-
-    def get_business_unit_ids(self):
-        '''List all available Business Units IDs'''
-        try:
-            bu_list = []
-            resource_map = self.get_resource_map()
-            if resource_map['Status'] == 'Success':
-                for resource in resource_map['data']:
-                    if len(resource['buMapSet']) > 0:
-                        bu_list += jmespath.search('buMapSet[].buId', resource)
-                        return list(dict.fromkeys(bu_list))
-            else:
-                raise Exception(resource_map)
-    
-        except Exception as e:
-            self.forticasb_logging.exception(e)
-            raise Exception(e)
-
-    def _get_dashboard(self,business_unit_id,start_time,end_time,dashboard):
-        ''' Get Dashboard'''
-        try:
-            payload = {"startTime":start_time,"endTime":end_time}
-            self.headers.update({'buId':str(business_unit_id)})
-            self.headers.update({'timeZone':strftime("%z", gmtime())})
-            response = self.make_rest_call('/dashboard/'+dashboard,
-                                      method='POST',
-                                      data=payload
-                                      )
-            if response['Status'] == 'Success':
-                return response
-            else:
-                raise Exception(response)
-
-        except Exception as e:
-            self.forticasb_logging.exception(e)
-            raise Exception(e)
-
-
-    def get_dashboard_risk(self,business_unit_id,start_time,end_time):
-        '''Get all risk trend data of all monitoring accounts in the business unit'''
-
-        return self._get_dashboard(business_unit_id,start_time,end_time,'risk')
-
-
-    def get_dashboard_usage(self,business_unit_id,start_time,end_time):
-        '''Get all activity usage trend data of all the monitoring cloud accounts in the business unit'''
-
-        return self._get_dashboard(business_unit_id,start_time,end_time,'usage')
-
-      
-    def get_bu_services(self,business_unit_id,start_time,end_time):
-        '''Get a list of services for a business Unit'''
-        try:      
-            dashboard_usage = self.get_dashboard_usage(business_unit_id,start_time,end_time)
-            if dashboard_usage['Status'] == 'Success':
-                services = jmespath.search('data[].name', dashboard_usage['data'])
-                if len(services) > 0:
-                    return {"data": services,'Status':'Success'}
-                else:
-                    return {"data": 'No services found','Status':'Failure'}
-            else:
-                return dashboard_usage
-        except Exception as e:
-            self.forticasb_logging.exception(e)
-            
-    def get_alert_list(self,business_unit_id, service, start_time, end_time, skip=0, limit=50):
-        '''Get cloud service account alert details.'''
-        try:
-            self.headers.update({'buId':str(business_unit_id)})
-            self.headers.update({'service':service})
-
-            payload = {
-                'service':service,
-                'startTime':start_time,
-                'endTime':end_time,
-                'skip':skip,
-                'limit':limit
+            data = {
+                "grant_type": "client_credentials"
             }
-            response = self.make_rest_call('/alert/list',
-                                      method='POST',
-                                      data=payload,
-                                      debug=True
-                                      )
-            if response['Status'] == 'Success':
-                return response
+            url = f"{self.server_url}/api/v1/auth/credentials/token/"
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Basic {self.secret}"
+            }
+            self.logger.info("Generating new token with URL: %s", url)
+            response = requests.request(
+                method="POST",
+                url=url,
+                headers=headers,
+                data=data,
+                verify=self.verify_ssl,
+                timeout=self.request_timeout
+            )
+            self.logger.debug("Token generation response: %s",
+                              dump.dump_all(response).decode('utf-8'))
+            if response.status_code in [200, 201]:
+                token_resp = response.json()
+                return token_resp
             else:
-                raise Exception(response)
+                err_msg = f"Token generation failed [{response.status_code}:{response.reason}]"
+                if response.text:
+                    try:
+                        error_details = response.json()
+                        err_msg += f" Details: {error_details.get('message', '')}"
+                    except Exception:
+                        pass
+                self.logger.error(err_msg)
+                raise ConnectorError(err_msg)
+        except Exception as err:
+            self.logger.exception("Failed to generate token")
+            raise ConnectorError(str(err))
 
+    def validate_token(self, config):
+        """
+        Validates and returns a valid bearer token.
+
+        If a token is absent or expired (based on the 'expiresAt' timestamp in the config),
+        a new token is generated. The token (and expiration) is then stored back into config.
+        """
+        ts_now = time()
+        if not config.get('token'):
+            self.logger.info(
+                "Token does not exist in config, generating new token.")
+            token_resp = self.generate_token()
+            config['token'] = token_resp['access_token']
+            config['expiresAt'] = token_resp['expires']
+            return f"Bearer {config['token']}"
+        else:
+            expires = config.get('expiresAt')
+            expires_ts = self.convert_ts_epoch(expires)
+            if ts_now > float(expires_ts):
+                self.logger.info(
+                    "Token expired at %s. Generating new token.", expires)
+                token_resp = self.generate_token()
+                config['token'] = token_resp['access_token']
+                config['expiresAt'] = token_resp['expires']
+                return f"Bearer {config['token']}"
+            else:
+                self.logger.info("Token is valid until %s.", expires)
+                return f"Bearer {config['token']}"
+
+    def make_api_call(self, config=None, endpoint=None, params=None, method='GET', data=None,
+                      additional_headers=None, is_token_call=False, is_next_page=False):
+        """
+        Makes an API call to the specified endpoint.
+
+        - When is_token_call is True, the method bypasses token validation and uses basic
+          authentication to fetch a new token.
+        - For regular calls, the method validates the token and builds the Bearer token header.
+        - If is_next_page is True, the endpoint is treated as a fully qualified URL.
+        """
+        if is_next_page:
+            url = endpoint
+        else:
+            url = f"{self.server_url}/api/v1/{endpoint}"
+        self.logger.info("Making API call to URL: %s", url)
+
+        try:
+            if is_token_call:
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": f"Basic {self.secret}"
+                }
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    headers=headers,
+                    data=data,
+                    verify=self.verify_ssl,
+                    timeout=self.request_timeout
+                )
+            else:
+                token = self.validate_token(config)
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": token
+                }
+                if additional_headers:
+                    headers = {**headers, **additional_headers}
+
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    headers=headers,
+                    json=data,
+                    verify=self.verify_ssl,
+                    timeout=self.request_timeout
+                )
+
+            if response.status_code in [200, 201]:
+                if response.text != "":
+                    return response.json()
+            elif response.status_code == 204:
+                return {"status": "ok", "message": "No content"}
+            else:
+                if response.text != "":
+                    try:
+                        err_resp = response.json()
+                        failure_msg = err_resp.get('message', '')
+                    except Exception:
+                        failure_msg = ""
+                    error_msg = f"Response [{response.status_code}:{response.reason}] Details: {failure_msg}"
+                else:
+                    error_msg = f"Response [{response.status_code}:{response.reason}]"
+                self.logger.error("API call failed: %s", error_msg)
+                raise ConnectorError(error_msg)
         except Exception as e:
-            self.forticasb_logging.exception(e)
-            raise Exception(e)
+            self.logger.exception("Request failed")
+            raise ConnectorError(f"Request Failed: {str(e)}")

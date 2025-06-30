@@ -2,13 +2,13 @@
   "name": "fortinet-forticasb",
   "version": "1.0.0",
   "label": "Fortinet FortiCASB",
-  "description": "FortiCASB Top Cloud Access Security Broker designed to provide visibility, compliance, data security, and threat protection for cloud-based services being used by an organization",
+  "description": "FortiCASB (Cloud Access Security Broker) is Fortinet’s cloud-native CASB solution, designed for comprehensive visibility, compliance, data security, and threat protection across SaaS and IaaS environments via API integration.",
   "publisher": "Fortinet",
   "icon_small_name": "small_icon.png",
   "icon_large_name": "large_icon.png",
   "cs_approved": true,
   "cs_compatible": true,
-  "category": "Investigation",
+  "category": "Cloud access security broker (CASB)",
   "help_online": "",
   "configuration": {
     "fields": [
@@ -325,7 +325,7 @@
         },
         {
           "name": "objectidlist",
-          "title": "Object ID List",
+          "title": "Object IDs",
           "type": "text",
           "editable": true,
           "visible": true,
@@ -373,7 +373,7 @@
         },
         {
           "name": "idList",
-          "title": "ID List",
+          "title": "Alert IDs",
           "type": "text",
           "editable": true,
           "visible": true,
@@ -764,7 +764,7 @@
         },
         {
           "name": "idList",
-          "title": "ID List",
+          "title": "Activity IDs",
           "type": "text",
           "editable": true,
           "visible": true,
